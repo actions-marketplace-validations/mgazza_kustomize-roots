@@ -52,6 +52,48 @@ Exclude directories:
 kustomize-roots -exclude .git -exclude vendor /path/to/repo
 ```
 
+## GitHub Action
+
+Use in your workflows to find or validate kustomize roots:
+
+```yaml
+- uses: mgazza/kustomize-roots@main
+  id: roots
+  with:
+    directory: .
+    exclude: ".git vendor"
+
+- run: echo "${{ steps.roots.outputs.roots }}"
+```
+
+Build all roots to validate they render cleanly:
+
+```yaml
+- uses: mgazza/kustomize-roots@main
+  with:
+    directory: .
+    build: "true"
+    output-dir: ./rendered
+    exclude: ".git"
+```
+
+### Action inputs
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `directory` | `.` | Directory to scan |
+| `build` | `false` | Build each root via kustomize build |
+| `output-dir` | | Write build output to files |
+| `json` | `false` | Output as JSON array |
+| `exclude` | `.git` | Space-separated glob patterns to skip |
+
+### Action outputs
+
+| Output | Description |
+|--------|-------------|
+| `roots` | Newline-separated list of root paths |
+| `roots-json` | JSON array of root paths |
+
 ## How it works
 
 1. **Discover** — walks the directory tree finding all `kustomization.yaml`, `kustomization.yml`, and `Kustomization` files

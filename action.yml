@@ -1,0 +1,71 @@
+name: kustomize-roots
+description: Find and optionally build root kustomization files in a directory tree
+branding:
+  icon: git-branch
+  color: blue
+
+inputs:
+  directory:
+    description: Directory to scan for kustomization files
+    required: false
+    default: "."
+  build:
+    description: Build each root via kustomize build
+    required: false
+    default: "false"
+  output-dir:
+    description: Write build output to files instead of stdout
+    required: false
+    default: ""
+  json:
+    description: Output root paths as JSON array
+    required: false
+    default: "false"
+  exclude:
+    description: Glob patterns to skip directories (space-separated)
+    required: false
+    default: ".git"
+
+outputs:
+  roots:
+    description: Newline-separated list of root kustomization paths
+    value: ${{ steps.run.outputs.roots }}
+  roots-json:
+    description: JSON array of root kustomization paths
+    value: ${{ steps.run.outputs.roots-json }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version: "1.21"
+
+    - name: Build kustomize-roots
+      shell: bash
+      run: go build -o ${{ github.action_path }}/kustomize-roots ${{ github.action_path }}
+
+    - name: Run kustomize-roots
+      id: run
+      shell: bash
+      run: |
+        ARGS=""
+        if [ "${{ inputs.build }}" = "true" ]; then
+          ARGS="$ARGS -build"
+        fi
+        if [ -n "${{ inputs.output-dir }}" ]; then
+          ARGS="$ARGS -output-dir ${{ inputs.output-dir }}"
+        fi
+        for pattern in ${{ inputs.exclude }}; do
+          ARGS="$ARGS -exclude $pattern"
+        done
+
+        ROOTS=$(${{ github.action_path }}/kustomize-roots $ARGS "${{ inputs.directory }}")
+        echo "roots<<EOF" >> "$GITHUB_OUTPUT"
+        echo "$ROOTS" >> "$GITHUB_OUTPUT"
+        echo "EOF" >> "$GITHUB_OUTPUT"
+
+        ROOTS_JSON=$(${{ github.action_path }}/kustomize-roots -json $ARGS "${{ inputs.directory }}")
+        echo "roots-json<<EOF" >> "$GITHUB_OUTPUT"
+        echo "$ROOTS_JSON" >> "$GITHUB_OUTPUT"
+        echo "EOF" >> "$GITHUB_OUTPUT"
