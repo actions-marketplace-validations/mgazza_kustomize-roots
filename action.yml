@@ -64,7 +64,8 @@ runs:
 
     - name: Build kustomize-roots
       shell: bash
-      run: go build -o ${{ github.action_path }}/kustomize-roots ${{ github.action_path }}
+      working-directory: ${{ github.action_path }}
+      run: go build -o ${{ github.action_path }}/kustomize-roots .
 
     # ---- build mode (default) ----
     - name: Run kustomize-roots
