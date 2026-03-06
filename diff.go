@@ -85,7 +85,7 @@ func diffDirs(baseDir, headDir string) (*DiffResult, error) {
 	return result, nil
 }
 
-// readDir reads all files from a directory into a map[filename]content.
+// readDir reads all files from a flat directory (matches -output-dir output).
 func readDir(dir string) (map[string]string, error) {
 	files := make(map[string]string)
 	entries, err := os.ReadDir(dir)
@@ -127,8 +127,8 @@ func writeDiffUnified(w io.Writer, result *DiffResult) {
 
 // writeUnifiedHunks writes unified diff hunks with context lines.
 func writeUnifiedHunks(w io.Writer, old, new string) {
-	oldLines := strings.Split(old, "\n")
-	newLines := strings.Split(new, "\n")
+	oldLines := strings.Split(strings.TrimRight(old, "\n"), "\n")
+	newLines := strings.Split(strings.TrimRight(new, "\n"), "\n")
 
 	// Simple line-by-line diff using longest common subsequence.
 	ops := computeEditScript(oldLines, newLines)
@@ -202,6 +202,7 @@ func computeEditScript(a, b []string) []editOp {
 }
 
 func countLines(s string) int {
+	s = strings.TrimRight(s, "\n")
 	if s == "" {
 		return 0
 	}
@@ -210,8 +211,8 @@ func countLines(s string) int {
 
 func countDiffLines(old, new string) (added, removed int) {
 	ops := computeEditScript(
-		strings.Split(old, "\n"),
-		strings.Split(new, "\n"),
+		strings.Split(strings.TrimRight(old, "\n"), "\n"),
+		strings.Split(strings.TrimRight(new, "\n"), "\n"),
 	)
 	for _, op := range ops {
 		switch op.kind {
