@@ -121,8 +121,8 @@ runs:
         done
 
         git worktree add /tmp/kustomize-base-tree ${{ steps.base-ref.outputs.ref }}
+        cd /tmp/kustomize-base-tree
         ${{ github.action_path }}/kustomize-roots -build -output-dir /tmp/kustomize-base $EXCLUDE_ARGS "${{ inputs.directory }}"
-      working-directory: /tmp/kustomize-base-tree
 
     - name: Render head manifests
       if: inputs.mode == 'artifact'
@@ -193,6 +193,13 @@ runs:
 
     # ---- pr-branch mode ----
     # Permissions required: contents: write, pull-requests: write
+    - name: Configure git identity (pr-branch)
+      if: inputs.mode == 'pr-branch'
+      shell: bash
+      run: |
+        git config user.name "kustomize-roots[bot]"
+        git config user.email "kustomize-roots[bot]@users.noreply.github.com"
+
     - name: Resolve base ref (pr-branch)
       id: pr-base-ref
       if: inputs.mode == 'pr-branch' && github.event.action != 'closed'
