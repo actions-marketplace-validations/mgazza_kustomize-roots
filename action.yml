@@ -25,6 +25,18 @@ inputs:
     description: Glob patterns to skip directories (space-separated)
     required: false
     default: ".git"
+  mode:
+    description: "Operating mode: build (default), artifact, or pr-branch"
+    required: false
+    default: "build"
+  base-ref:
+    description: Base git ref for diff modes (default: base ref from PR event)
+    required: false
+    default: ""
+  rendered-branch:
+    description: Orphan branch name for pr-branch mode
+    required: false
+    default: "rendered"
 
 outputs:
   roots:
@@ -33,6 +45,12 @@ outputs:
   roots-json:
     description: JSON array of root kustomization paths
     value: ${{ steps.run.outputs.roots-json }}
+  diff:
+    description: Unified diff text (artifact mode only)
+    value: ${{ steps.diff.outputs.diff }}
+  has-changes:
+    description: Whether rendered manifests changed (artifact mode only)
+    value: ${{ steps.diff.outputs.has-changes }}
 
 runs:
   using: composite
@@ -45,8 +63,10 @@ runs:
       shell: bash
       run: go build -o ${{ github.action_path }}/kustomize-roots ${{ github.action_path }}
 
+    # ---- build mode (default) ----
     - name: Run kustomize-roots
       id: run
+      if: inputs.mode == 'build'
       shell: bash
       run: |
         ARGS=""
@@ -69,3 +89,104 @@ runs:
         echo "roots-json<<EOF" >> "$GITHUB_OUTPUT"
         echo "$ROOTS_JSON" >> "$GITHUB_OUTPUT"
         echo "EOF" >> "$GITHUB_OUTPUT"
+
+    # ---- artifact mode ----
+    # Permissions required: contents: read, pull-requests: write
+    - name: Resolve base ref
+      id: base-ref
+      if: inputs.mode == 'artifact'
+      shell: bash
+      run: |
+        BASE_REF="${{ inputs.base-ref }}"
+        if [ -z "$BASE_REF" ]; then
+          BASE_REF="${{ github.event.pull_request.base.sha }}"
+        fi
+        if [ -z "$BASE_REF" ]; then
+          echo "::error::base-ref is required for artifact mode (or run on a pull_request event)"
+          exit 1
+        fi
+        echo "ref=$BASE_REF" >> "$GITHUB_OUTPUT"
+
+    - name: Render base manifests
+      if: inputs.mode == 'artifact'
+      shell: bash
+      run: |
+        EXCLUDE_ARGS=""
+        for pattern in ${{ inputs.exclude }}; do
+          EXCLUDE_ARGS="$EXCLUDE_ARGS -exclude $pattern"
+        done
+
+        git worktree add /tmp/kustomize-base-tree ${{ steps.base-ref.outputs.ref }}
+        ${{ github.action_path }}/kustomize-roots -build -output-dir /tmp/kustomize-base $EXCLUDE_ARGS "${{ inputs.directory }}"
+      working-directory: /tmp/kustomize-base-tree
+
+    - name: Render head manifests
+      if: inputs.mode == 'artifact'
+      shell: bash
+      run: |
+        EXCLUDE_ARGS=""
+        for pattern in ${{ inputs.exclude }}; do
+          EXCLUDE_ARGS="$EXCLUDE_ARGS -exclude $pattern"
+        done
+
+        mkdir -p /tmp/kustomize-head
+        ${{ github.action_path }}/kustomize-roots -build -output-dir /tmp/kustomize-head $EXCLUDE_ARGS "${{ inputs.directory }}"
+
+    - name: Generate diffs
+      id: diff
+      if: inputs.mode == 'artifact'
+      shell: bash
+      run: |
+        ${{ github.action_path }}/kustomize-roots diff -format html /tmp/kustomize-base /tmp/kustomize-head > /tmp/kustomize-diff.html || true
+        ${{ github.action_path }}/kustomize-roots diff /tmp/kustomize-base /tmp/kustomize-head > /tmp/kustomize-diff.diff || true
+
+        if [ -s /tmp/kustomize-diff.diff ]; then
+          ADDED=$(grep -c '^+' /tmp/kustomize-diff.diff || true)
+          REMOVED=$(grep -c '^-' /tmp/kustomize-diff.diff || true)
+          FILES=$(grep -c '^--- ' /tmp/kustomize-diff.diff || true)
+          echo "has-changes=true" >> "$GITHUB_OUTPUT"
+          echo "added=$ADDED" >> "$GITHUB_OUTPUT"
+          echo "removed=$REMOVED" >> "$GITHUB_OUTPUT"
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          echo "diff<<EOF" >> "$GITHUB_OUTPUT"
+          cat /tmp/kustomize-diff.diff >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+        else
+          echo "has-changes=false" >> "$GITHUB_OUTPUT"
+          echo "diff=" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Upload diff artifacts
+      if: inputs.mode == 'artifact' && steps.diff.outputs.has-changes == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: kustomize-diff
+        path: |
+          /tmp/kustomize-diff.html
+          /tmp/kustomize-diff.diff
+
+    - name: Comment on PR
+      if: inputs.mode == 'artifact' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        if [ "${{ steps.diff.outputs.has-changes }}" = "true" ]; then
+          BODY="### Kustomize Diff Summary
+
+        **${{ steps.diff.outputs.files }}** file(s) changed — **+${{ steps.diff.outputs.added }}** added, **-${{ steps.diff.outputs.removed }}** removed
+
+        Download the [diff artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for the full HTML report."
+        else
+          BODY="### Kustomize Diff Summary
+
+        No changes to rendered manifests."
+        fi
+
+        gh pr comment "${{ github.event.pull_request.number }}" --body "$BODY"
+
+    - name: Cleanup worktree
+      if: inputs.mode == 'artifact' && always()
+      shell: bash
+      run: |
+        git worktree remove /tmp/kustomize-base-tree --force 2>/dev/null || true
