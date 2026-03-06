@@ -274,7 +274,7 @@ runs:
       run: |
         RENDERED="${{ inputs.rendered-branch }}"
         PR_NUMBER="${{ github.event.pull_request.number }}"
-        SHADOW_BRANCH="$RENDERED/pr-$PR_NUMBER"
+        SHADOW_BRANCH="${RENDERED}-pr-${PR_NUMBER}"
 
         # Fetch the rendered branch.
         git fetch origin "$RENDERED"
@@ -309,7 +309,7 @@ runs:
       run: |
         RENDERED="${{ inputs.rendered-branch }}"
         PR_NUMBER="${{ github.event.pull_request.number }}"
-        SHADOW_BRANCH="$RENDERED/pr-$PR_NUMBER"
+        SHADOW_BRANCH="${RENDERED}-pr-${PR_NUMBER}"
 
         # Check if shadow PR already exists.
         EXISTING=$(gh pr list --base "$RENDERED" --head "$SHADOW_BRANCH" --json number --jq '.[0].number' 2>/dev/null || true)
@@ -356,7 +356,7 @@ runs:
       run: |
         RENDERED="${{ inputs.rendered-branch }}"
         PR_NUMBER="${{ github.event.pull_request.number }}"
-        SHADOW_BRANCH="$RENDERED/pr-$PR_NUMBER"
+        SHADOW_BRANCH="${RENDERED}-pr-${PR_NUMBER}"
 
         # Find the shadow PR.
         SHADOW_NUMBER=$(gh pr list --base "$RENDERED" --head "$SHADOW_BRANCH" --json number --jq '.[0].number' 2>/dev/null || true)
