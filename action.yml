@@ -30,7 +30,7 @@ inputs:
     required: false
     default: "build"
   base-ref:
-    description: Base git ref for diff modes (default: base ref from PR event)
+    description: "Base git ref for diff modes (default: base ref from PR event)"
     required: false
     default: ""
   rendered-branch:
@@ -46,11 +46,14 @@ outputs:
     description: JSON array of root kustomization paths
     value: ${{ steps.run.outputs.roots-json }}
   diff:
-    description: Unified diff text (artifact mode only)
+    description: Unified diff text (artifact/pr-branch modes)
     value: ${{ steps.diff.outputs.diff }}
   has-changes:
-    description: Whether rendered manifests changed (artifact mode only)
+    description: Whether rendered manifests changed (artifact/pr-branch modes)
     value: ${{ steps.diff.outputs.has-changes }}
+  shadow-pr:
+    description: Shadow PR number (pr-branch mode only)
+    value: ${{ steps.shadow-pr.outputs.number }}
 
 runs:
   using: composite
@@ -190,3 +193,187 @@ runs:
       shell: bash
       run: |
         git worktree remove /tmp/kustomize-base-tree --force 2>/dev/null || true
+
+    # ---- pr-branch mode ----
+    # Permissions required: contents: write, pull-requests: write
+    - name: Resolve base ref (pr-branch)
+      id: pr-base-ref
+      if: inputs.mode == 'pr-branch' && github.event.action != 'closed'
+      shell: bash
+      run: |
+        BASE_REF="${{ inputs.base-ref }}"
+        if [ -z "$BASE_REF" ]; then
+          BASE_REF="${{ github.event.pull_request.base.sha }}"
+        fi
+        if [ -z "$BASE_REF" ]; then
+          echo "::error::base-ref is required for pr-branch mode (or run on a pull_request event)"
+          exit 1
+        fi
+        echo "ref=$BASE_REF" >> "$GITHUB_OUTPUT"
+
+    - name: Render head manifests (pr-branch)
+      if: inputs.mode == 'pr-branch' && github.event.action != 'closed'
+      shell: bash
+      run: |
+        EXCLUDE_ARGS=""
+        for pattern in ${{ inputs.exclude }}; do
+          EXCLUDE_ARGS="$EXCLUDE_ARGS -exclude $pattern"
+        done
+
+        mkdir -p /tmp/kustomize-head
+        ${{ github.action_path }}/kustomize-roots -build -output-dir /tmp/kustomize-head $EXCLUDE_ARGS "${{ inputs.directory }}"
+
+    - name: Ensure rendered branch exists
+      if: inputs.mode == 'pr-branch' && github.event.action != 'closed'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        RENDERED="${{ inputs.rendered-branch }}"
+
+        # Check if the rendered branch exists on remote.
+        if git ls-remote --exit-code origin "refs/heads/$RENDERED" >/dev/null 2>&1; then
+          echo "Rendered branch '$RENDERED' already exists."
+          exit 0
+        fi
+
+        echo "Creating orphan rendered branch '$RENDERED' from base ref..."
+
+        # Render base manifests into a temp dir.
+        EXCLUDE_ARGS=""
+        for pattern in ${{ inputs.exclude }}; do
+          EXCLUDE_ARGS="$EXCLUDE_ARGS -exclude $pattern"
+        done
+
+        git worktree add /tmp/kustomize-rendered-init ${{ steps.pr-base-ref.outputs.ref }}
+        mkdir -p /tmp/kustomize-rendered-base
+        (cd /tmp/kustomize-rendered-init && ${{ github.action_path }}/kustomize-roots -build -output-dir /tmp/kustomize-rendered-base $EXCLUDE_ARGS "${{ inputs.directory }}")
+
+        # Create orphan branch with rendered files.
+        git worktree add --detach /tmp/kustomize-rendered-orphan
+        cd /tmp/kustomize-rendered-orphan
+        git checkout --orphan "$RENDERED"
+        git rm -rf . 2>/dev/null || true
+        cp /tmp/kustomize-rendered-base/*.yaml . 2>/dev/null || true
+        if [ -n "$(ls *.yaml 2>/dev/null)" ]; then
+          git add *.yaml
+          git commit -m "Initial rendered manifests from $(git rev-parse --short ${{ steps.pr-base-ref.outputs.ref }})"
+        else
+          git commit --allow-empty -m "Initial rendered branch (no manifests)"
+        fi
+        git push origin "$RENDERED"
+
+    - name: Create or update shadow branch
+      id: shadow-branch
+      if: inputs.mode == 'pr-branch' && github.event.action != 'closed'
+      shell: bash
+      run: |
+        RENDERED="${{ inputs.rendered-branch }}"
+        PR_NUMBER="${{ github.event.pull_request.number }}"
+        SHADOW_BRANCH="$RENDERED/pr-$PR_NUMBER"
+
+        # Fetch the rendered branch.
+        git fetch origin "$RENDERED"
+
+        # Create the shadow branch from rendered.
+        git worktree add /tmp/kustomize-shadow "origin/$RENDERED"
+        cd /tmp/kustomize-shadow
+        git checkout -B "$SHADOW_BRANCH"
+
+        # Replace contents with head-rendered manifests.
+        rm -f *.yaml 2>/dev/null || true
+        cp /tmp/kustomize-head/*.yaml . 2>/dev/null || true
+
+        # Commit and push.
+        git add -A
+        if git diff --cached --quiet; then
+          echo "No changes to rendered manifests."
+          echo "has-changes=false" >> "$GITHUB_OUTPUT"
+        else
+          git commit -m "Rendered manifests for PR #$PR_NUMBER - ${{ github.event.pull_request.title }} (${{ github.sha }})"
+          git push -f origin "$SHADOW_BRANCH"
+          echo "has-changes=true" >> "$GITHUB_OUTPUT"
+        fi
+        echo "branch=$SHADOW_BRANCH" >> "$GITHUB_OUTPUT"
+
+    - name: Create or update shadow PR
+      id: shadow-pr
+      if: inputs.mode == 'pr-branch' && github.event.action != 'closed' && steps.shadow-branch.outputs.has-changes == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        RENDERED="${{ inputs.rendered-branch }}"
+        PR_NUMBER="${{ github.event.pull_request.number }}"
+        SHADOW_BRANCH="$RENDERED/pr-$PR_NUMBER"
+
+        # Check if shadow PR already exists.
+        EXISTING=$(gh pr list --base "$RENDERED" --head "$SHADOW_BRANCH" --json number --jq '.[0].number' 2>/dev/null || true)
+
+        if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
+          echo "Shadow PR #$EXISTING already exists, updated via force push."
+          echo "number=$EXISTING" >> "$GITHUB_OUTPUT"
+        else
+          PR_BODY="Shadow PR showing rendered manifest diff for #$PR_NUMBER."
+          PR_BODY="$PR_BODY This PR is automatically managed. Do not merge manually."
+          SHADOW_NUMBER=$(gh pr create \
+            --base "$RENDERED" \
+            --head "$SHADOW_BRANCH" \
+            --title "Rendered: ${{ github.event.pull_request.title }}" \
+            --body "$PR_BODY" \
+            --json number --jq '.number' 2>/dev/null || true)
+
+          if [ -n "$SHADOW_NUMBER" ]; then
+            echo "number=$SHADOW_NUMBER" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Failed to create shadow PR"
+          fi
+        fi
+
+    - name: Comment on source PR (pr-branch)
+      if: inputs.mode == 'pr-branch' && github.event.action != 'closed' && steps.shadow-pr.outputs.number != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        SHADOW_NUMBER="${{ steps.shadow-pr.outputs.number }}"
+        REPO_URL="${{ github.server_url }}/${{ github.repository }}"
+        BODY="### Rendered Manifest Diff"
+        BODY="$BODY"$'\n\n'"View the rendered manifest changes in the **Files Changed** tab of the shadow PR:"
+        BODY="$BODY"$'\n\n'"**[Shadow PR #${SHADOW_NUMBER}](${REPO_URL}/pull/${SHADOW_NUMBER}/files)**"
+        BODY="$BODY"$'\n\n'"This shows the actual Kubernetes resources that will change when this PR is merged."
+        gh pr comment "${{ github.event.pull_request.number }}" --body "$BODY"
+
+    - name: Handle source PR closed (pr-branch)
+      if: inputs.mode == 'pr-branch' && github.event.action == 'closed'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        RENDERED="${{ inputs.rendered-branch }}"
+        PR_NUMBER="${{ github.event.pull_request.number }}"
+        SHADOW_BRANCH="$RENDERED/pr-$PR_NUMBER"
+
+        # Find the shadow PR.
+        SHADOW_NUMBER=$(gh pr list --base "$RENDERED" --head "$SHADOW_BRANCH" --json number --jq '.[0].number' 2>/dev/null || true)
+
+        if [ -z "$SHADOW_NUMBER" ] || [ "$SHADOW_NUMBER" = "null" ]; then
+          echo "No shadow PR found for $SHADOW_BRANCH, nothing to clean up."
+          exit 0
+        fi
+
+        if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
+          echo "Source PR merged — merging shadow PR #$SHADOW_NUMBER"
+          gh pr merge "$SHADOW_NUMBER" --merge --delete-branch || echo "::warning::Failed to merge shadow PR #$SHADOW_NUMBER"
+        else
+          echo "Source PR closed without merge — closing shadow PR #$SHADOW_NUMBER"
+          gh pr close "$SHADOW_NUMBER" --delete-branch || echo "::warning::Failed to close shadow PR #$SHADOW_NUMBER"
+        fi
+
+    - name: Cleanup worktrees (pr-branch)
+      if: inputs.mode == 'pr-branch' && always()
+      shell: bash
+      run: |
+        git worktree remove /tmp/kustomize-rendered-init --force 2>/dev/null || true
+        git worktree remove /tmp/kustomize-rendered-orphan --force 2>/dev/null || true
+        git worktree remove /tmp/kustomize-shadow --force 2>/dev/null || true
