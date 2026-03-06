@@ -113,6 +113,10 @@ on:
   pull_request:
     types: [opened, synchronize, closed]
 
+concurrency:
+  group: kustomize-diff-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   rendered-diff:
     runs-on: ubuntu-latest

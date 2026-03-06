@@ -175,15 +175,11 @@ runs:
         GH_TOKEN: ${{ github.token }}
       run: |
         if [ "${{ steps.diff.outputs.has-changes }}" = "true" ]; then
-          BODY="### Kustomize Diff Summary
-
-        **${{ steps.diff.outputs.files }}** file(s) changed — **+${{ steps.diff.outputs.added }}** added, **-${{ steps.diff.outputs.removed }}** removed
-
-        Download the [diff artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for the full HTML report."
+          BODY="### Kustomize Diff Summary"
+          BODY="$BODY"$'\n\n'"**${{ steps.diff.outputs.files }}** file(s) changed — **+${{ steps.diff.outputs.added }}** added, **-${{ steps.diff.outputs.removed }}** removed"
+          BODY="$BODY"$'\n\n'"Download the [diff artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for the full HTML report."
         else
-          BODY="### Kustomize Diff Summary
-
-        No changes to rendered manifests."
+          BODY="### Kustomize Diff Summary"$'\n\n'"No changes to rendered manifests."
         fi
 
         gh pr comment "${{ github.event.pull_request.number }}" --body "$BODY"
@@ -316,14 +312,14 @@ runs:
         else
           PR_BODY="Shadow PR showing rendered manifest diff for #$PR_NUMBER."
           PR_BODY="$PR_BODY This PR is automatically managed. Do not merge manually."
-          SHADOW_NUMBER=$(gh pr create \
+          SHADOW_URL=$(gh pr create \
             --base "$RENDERED" \
             --head "$SHADOW_BRANCH" \
             --title "Rendered: ${{ github.event.pull_request.title }}" \
-            --body "$PR_BODY" \
-            --json number --jq '.number' 2>/dev/null || true)
+            --body "$PR_BODY" 2>/dev/null || true)
 
-          if [ -n "$SHADOW_NUMBER" ]; then
+          if [ -n "$SHADOW_URL" ]; then
+            SHADOW_NUMBER=$(echo "$SHADOW_URL" | grep -oE '[0-9]+$')
             echo "number=$SHADOW_NUMBER" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::Failed to create shadow PR"
