@@ -17,6 +17,12 @@ func (e *excludeFlags) Set(v string) error {
 }
 
 func main() {
+	// Check for diff subcommand.
+	if len(os.Args) > 1 && os.Args[1] == "diff" {
+		runDiff(os.Args[2:])
+		return
+	}
+
 	var (
 		buildFlag   = flag.Bool("build", false, "Build each root via kustomize build")
 		outputDir   = flag.String("output-dir", "", "Write build output to files instead of stdout")
@@ -70,5 +76,40 @@ func main() {
 
 	for _, r := range roots {
 		fmt.Println(r)
+	}
+}
+
+func runDiff(args []string) {
+	fs := flag.NewFlagSet("diff", flag.ExitOnError)
+	format := fs.String("format", "unified", "Output format: unified, html")
+	fs.Parse(args)
+
+	if fs.NArg() != 2 {
+		fmt.Fprintf(os.Stderr, "usage: kustomize-roots diff [-format unified|html] <base-dir> <head-dir>\n")
+		os.Exit(1)
+	}
+
+	baseDir := fs.Arg(0)
+	headDir := fs.Arg(1)
+
+	result, err := diffDirs(baseDir, headDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !result.HasChanges() {
+		fmt.Fprintln(os.Stderr, "no changes")
+		return
+	}
+
+	switch *format {
+	case "unified":
+		writeDiffUnified(os.Stdout, result)
+	case "html":
+		writeDiffHTML(os.Stdout, result)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown format: %s\n", *format)
+		os.Exit(1)
 	}
 }
