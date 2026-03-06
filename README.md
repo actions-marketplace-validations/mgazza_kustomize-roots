@@ -52,6 +52,20 @@ Exclude directories:
 kustomize-roots -exclude .git -exclude vendor /path/to/repo
 ```
 
+### Diff subcommand
+
+Compare two directories of rendered manifests:
+
+```bash
+# Unified diff
+kustomize-roots diff /tmp/base-rendered/ /tmp/head-rendered/
+
+# HTML diff (interactive standalone viewer)
+kustomize-roots diff -format html /tmp/base/ /tmp/head/ > diff.html
+```
+
+The diff compares files by name across both directories, reporting added, deleted, and modified files with LCS-based line diffing.
+
 ## GitHub Action
 
 Use in your workflows to find or validate kustomize roots:
@@ -77,6 +91,46 @@ Build all roots to validate they render cleanly:
     exclude: ".git"
 ```
 
+### Artifact mode
+
+Generate an interactive HTML diff and upload as a GitHub Actions artifact. Posts a summary comment on the PR:
+
+```yaml
+- uses: mgazza/kustomize-roots@main
+  with:
+    mode: artifact
+    exclude: ".git src"
+```
+
+Requires `contents: read` and `pull-requests: write` permissions.
+
+### PR-branch mode
+
+Maintain an orphan `rendered` branch with rendered manifests tracking main. Creates shadow PRs so reviewers see the rendered diff in GitHub's native Files Changed tab:
+
+```yaml
+on:
+  pull_request:
+    types: [opened, synchronize, closed]
+
+jobs:
+  rendered-diff:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: mgazza/kustomize-roots@main
+        with:
+          mode: pr-branch
+          exclude: ".git src"
+```
+
+When a source PR is opened/updated, a shadow PR is created on the `rendered` branch showing the rendered manifest diff. When the source PR is merged, the shadow PR is auto-merged to keep the `rendered` branch in sync. When closed without merge, the shadow PR is cleaned up.
+
 ### Action inputs
 
 | Input | Default | Description |
@@ -86,6 +140,9 @@ Build all roots to validate they render cleanly:
 | `output-dir` | | Write build output to files |
 | `json` | `false` | Output as JSON array |
 | `exclude` | `.git` | Space-separated glob patterns to skip |
+| `mode` | `build` | Operating mode: `build`, `artifact`, or `pr-branch` |
+| `base-ref` | | Base git ref for diff modes (defaults to PR base) |
+| `rendered-branch` | `rendered` | Orphan branch name for pr-branch mode |
 
 ### Action outputs
 
@@ -93,6 +150,9 @@ Build all roots to validate they render cleanly:
 |--------|-------------|
 | `roots` | Newline-separated list of root paths |
 | `roots-json` | JSON array of root paths |
+| `diff` | Unified diff text (artifact/pr-branch modes) |
+| `has-changes` | Whether rendered manifests changed |
+| `shadow-pr` | Shadow PR number (pr-branch mode only) |
 
 ## How it works
 
