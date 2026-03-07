@@ -130,16 +130,20 @@ func writeUnifiedHunks(w io.Writer, old, new string) {
 	oldLines := strings.Split(strings.TrimRight(old, "\n"), "\n")
 	newLines := strings.Split(strings.TrimRight(new, "\n"), "\n")
 
-	// Simple line-by-line diff using longest common subsequence.
 	ops := computeEditScript(oldLines, newLines)
-	for _, op := range ops {
-		switch op.kind {
-		case opEqual:
-			fmt.Fprintf(w, " %s\n", op.line)
-		case opDelete:
-			fmt.Fprintf(w, "-%s\n", op.line)
-		case opInsert:
-			fmt.Fprintf(w, "+%s\n", op.line)
+	hunks := filterToHunks(ops, 3)
+
+	for _, h := range hunks {
+		fmt.Fprintf(w, "@@ -%d,%d +%d,%d @@\n", h.oldStart, h.oldCount, h.newStart, h.newCount)
+		for _, op := range h.ops {
+			switch op.kind {
+			case opEqual:
+				fmt.Fprintf(w, " %s\n", op.line)
+			case opDelete:
+				fmt.Fprintf(w, "-%s\n", op.line)
+			case opInsert:
+				fmt.Fprintf(w, "+%s\n", op.line)
+			}
 		}
 	}
 }
@@ -155,6 +159,80 @@ const (
 type editOp struct {
 	kind opKind
 	line string
+}
+
+// hunk represents a group of changes with surrounding context lines.
+type hunk struct {
+	oldStart int
+	oldCount int
+	newStart int
+	newCount int
+	ops      []editOp
+}
+
+// filterToHunks groups changes with surrounding context lines into hunks.
+func filterToHunks(ops []editOp, context int) []hunk {
+	if len(ops) == 0 {
+		return nil
+	}
+
+	// Mark which ops are within context range of a change.
+	include := make([]bool, len(ops))
+	for i, op := range ops {
+		if op.kind != opEqual {
+			lo := i - context
+			if lo < 0 {
+				lo = 0
+			}
+			hi := i + context
+			if hi >= len(ops) {
+				hi = len(ops) - 1
+			}
+			for j := lo; j <= hi; j++ {
+				include[j] = true
+			}
+		}
+	}
+
+	// Build hunks from consecutive included ops.
+	var hunks []hunk
+	var cur *hunk
+	oldLine, newLine := 1, 1
+	for i, op := range ops {
+		if include[i] {
+			if cur == nil {
+				cur = &hunk{oldStart: oldLine, newStart: newLine}
+			}
+			cur.ops = append(cur.ops, op)
+			switch op.kind {
+			case opEqual:
+				cur.oldCount++
+				cur.newCount++
+			case opDelete:
+				cur.oldCount++
+			case opInsert:
+				cur.newCount++
+			}
+		} else if cur != nil {
+			hunks = append(hunks, *cur)
+			cur = nil
+		}
+
+		switch op.kind {
+		case opEqual:
+			oldLine++
+			newLine++
+		case opDelete:
+			oldLine++
+		case opInsert:
+			newLine++
+		}
+	}
+	if cur != nil {
+		hunks = append(hunks, *cur)
+	}
+
+	return hunks
 }
 
 // computeEditScript produces a minimal edit script between two line slices.

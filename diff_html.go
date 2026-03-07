@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"html/template"
 	"io"
 	"strings"
@@ -111,16 +112,48 @@ func buildHTMLData(result *DiffResult) htmlTemplateData {
 		oldLines := strings.Split(strings.TrimRight(f.OldContent, "\n"), "\n")
 		newLines := strings.Split(strings.TrimRight(f.NewContent, "\n"), "\n")
 		ops := computeEditScript(oldLines, newLines)
-		for _, op := range ops {
-			switch op.kind {
-			case opEqual:
-				hf.DiffLines = append(hf.DiffLines, htmlDiffLine{"unchanged", " ", op.line})
-			case opDelete:
-				hf.DiffLines = append(hf.DiffLines, htmlDiffLine{"removed", "-", op.line})
-			case opInsert:
-				hf.DiffLines = append(hf.DiffLines, htmlDiffLine{"added", "+", op.line})
+		hunks := filterToHunks(ops, 3)
+
+		for i, h := range hunks {
+			// Add collapsed indicator for skipped lines.
+			var skipped int
+			if i == 0 {
+				skipped = h.oldStart - 1
+			} else {
+				prev := hunks[i-1]
+				skipped = h.oldStart - (prev.oldStart + prev.oldCount)
+			}
+			if skipped > 0 {
+				hf.DiffLines = append(hf.DiffLines, htmlDiffLine{
+					Class:   "collapsed-indicator",
+					Content: fmt.Sprintf("⋯ %d unchanged lines ⋯", skipped),
+				})
+			}
+
+			for _, op := range h.ops {
+				switch op.kind {
+				case opEqual:
+					hf.DiffLines = append(hf.DiffLines, htmlDiffLine{"unchanged", " ", op.line})
+				case opDelete:
+					hf.DiffLines = append(hf.DiffLines, htmlDiffLine{"removed", "-", op.line})
+				case opInsert:
+					hf.DiffLines = append(hf.DiffLines, htmlDiffLine{"added", "+", op.line})
+				}
 			}
 		}
+
+		// Add collapsed indicator for remaining lines after last hunk.
+		if len(hunks) > 0 {
+			last := hunks[len(hunks)-1]
+			remaining := len(oldLines) - (last.oldStart + last.oldCount - 1)
+			if remaining > 0 {
+				hf.DiffLines = append(hf.DiffLines, htmlDiffLine{
+					Class:   "collapsed-indicator",
+					Content: fmt.Sprintf("⋯ %d unchanged lines ⋯", remaining),
+				})
+			}
+		}
+
 		data.TotalAdded += f.LinesAdded
 		data.TotalRemoved += f.LinesRemoved
 		data.Files = append(data.Files, hf)
@@ -184,6 +217,9 @@ html, body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFo
 .diff-content .removed .line-prefix { background: #ffd7d5; color: #82071e; }
 .diff-content .unchanged { background: #fff; }
 .diff-content .unchanged .line-prefix { color: #8b949e; }
+.diff-content .collapsed-indicator { background: #f6f8fa; border-top: 1px solid #eaeef2; border-bottom: 1px solid #eaeef2; }
+.diff-content .collapsed-indicator .line-prefix { display: none; }
+.diff-content .collapsed-indicator .line-text { text-align: center; color: #57606a; font-style: italic; padding: 4px 8px; }
 .collapsed-content { display: none; }
 .toolbar { padding: 8px 16px; border-bottom: 1px solid #d0d7de; display: flex; gap: 8px; }
 .toolbar button { font-size: 12px; padding: 4px 12px; border: 1px solid #d0d7de; border-radius: 4px; background: #fff; cursor: pointer; color: #24292f; }

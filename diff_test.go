@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,5 +93,102 @@ func TestDiffFiles_Deleted(t *testing.T) {
 	}
 	if len(result.Deleted) != 1 {
 		t.Fatalf("expected 1 deleted, got %d", len(result.Deleted))
+	}
+}
+
+func TestWriteUnifiedHunks_ExcludesDistantLines(t *testing.T) {
+	// 20-line file with only line 10 changed — lines far from the change must be excluded.
+	var oldLines, newLines []string
+	for i := 1; i <= 20; i++ {
+		oldLines = append(oldLines, fmt.Sprintf("line %d", i))
+		if i == 10 {
+			newLines = append(newLines, "line 10 modified")
+		} else {
+			newLines = append(newLines, fmt.Sprintf("line %d", i))
+		}
+	}
+
+	old := strings.Join(oldLines, "\n") + "\n"
+	new := strings.Join(newLines, "\n") + "\n"
+
+	var buf bytes.Buffer
+	writeUnifiedHunks(&buf, old, new)
+	output := buf.String()
+
+	// Should contain hunk header.
+	if !strings.Contains(output, "@@ -7,7 +7,7 @@") {
+		t.Errorf("expected hunk header '@@ -7,7 +7,7 @@', got:\n%s", output)
+	}
+
+	// Should NOT contain distant unchanged lines.
+	if strings.Contains(output, " line 1\n") {
+		t.Error("line 1 should be excluded (too far from change)")
+	}
+	if strings.Contains(output, " line 5\n") {
+		t.Error("line 5 should be excluded (too far from change)")
+	}
+	if strings.Contains(output, " line 15\n") {
+		t.Error("line 15 should be excluded (too far from change)")
+	}
+	if strings.Contains(output, " line 20\n") {
+		t.Error("line 20 should be excluded (too far from change)")
+	}
+
+	// Should contain context and changed lines.
+	if !strings.Contains(output, " line 7\n") {
+		t.Error("context line 7 should be included")
+	}
+	if !strings.Contains(output, " line 9\n") {
+		t.Error("context line 9 should be included")
+	}
+	if !strings.Contains(output, "-line 10\n") {
+		t.Error("removed line 10 should be included")
+	}
+	if !strings.Contains(output, "+line 10 modified\n") {
+		t.Error("added line 10 modified should be included")
+	}
+	if !strings.Contains(output, " line 13\n") {
+		t.Error("context line 13 should be included")
+	}
+}
+
+func TestFilterToHunks_MergesOverlappingContext(t *testing.T) {
+	// Two changes 4 lines apart — with 3 context lines they should merge into one hunk.
+	var oldLines, newLines []string
+	for i := 1; i <= 15; i++ {
+		oldLines = append(oldLines, fmt.Sprintf("line %d", i))
+		if i == 5 || i == 10 {
+			newLines = append(newLines, fmt.Sprintf("line %d changed", i))
+		} else {
+			newLines = append(newLines, fmt.Sprintf("line %d", i))
+		}
+	}
+
+	ops := computeEditScript(oldLines, newLines)
+	hunks := filterToHunks(ops, 3)
+
+	// Changes at lines 5 and 10 with 3 context: ranges overlap so should be 1 hunk.
+	if len(hunks) != 1 {
+		t.Fatalf("expected 1 merged hunk, got %d", len(hunks))
+	}
+}
+
+func TestFilterToHunks_SplitsSeparateChanges(t *testing.T) {
+	// Two changes far apart — should produce 2 separate hunks.
+	var oldLines, newLines []string
+	for i := 1; i <= 30; i++ {
+		oldLines = append(oldLines, fmt.Sprintf("line %d", i))
+		if i == 5 || i == 25 {
+			newLines = append(newLines, fmt.Sprintf("line %d changed", i))
+		} else {
+			newLines = append(newLines, fmt.Sprintf("line %d", i))
+		}
+	}
+
+	ops := computeEditScript(oldLines, newLines)
+	hunks := filterToHunks(ops, 3)
+
+	if len(hunks) != 2 {
+		t.Fatalf("expected 2 separate hunks, got %d", len(hunks))
 	}
 }

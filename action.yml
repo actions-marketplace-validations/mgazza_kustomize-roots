@@ -95,7 +95,7 @@ runs:
         echo "EOF" >> "$GITHUB_OUTPUT"
 
     # ---- artifact mode ----
-    # Permissions required: contents: read, pull-requests: write
+    # Permissions required: contents: write, pull-requests: write
     - name: Resolve base ref
       id: base-ref
       if: inputs.mode == 'artifact'
@@ -169,27 +169,118 @@ runs:
           /tmp/kustomize-diff.html
           /tmp/kustomize-diff.diff
 
+    - name: Publish diff to GitHub Pages
+      id: pages
+      if: inputs.mode == 'artifact' && steps.diff.outputs.has-changes == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        PR_NUMBER="${{ github.event.pull_request.number }}"
+        PAGES_DIR="/tmp/kustomize-pages"
+
+        git config user.name "kustomize-roots[bot]"
+        git config user.email "kustomize-roots[bot]@users.noreply.github.com"
+
+        # Ensure gh-pages branch exists.
+        if git ls-remote --exit-code origin refs/heads/gh-pages >/dev/null 2>&1; then
+          git fetch origin gh-pages
+          git worktree add "$PAGES_DIR" origin/gh-pages
+          cd "$PAGES_DIR"
+          git checkout -B gh-pages origin/gh-pages
+        else
+          git worktree add --detach "$PAGES_DIR"
+          cd "$PAGES_DIR"
+          git checkout --orphan gh-pages
+          git rm -rf . 2>/dev/null || true
+          git commit --allow-empty -m "Initialize gh-pages branch"
+        fi
+
+        # Copy diff HTML.
+        mkdir -p "diffs/pr-${PR_NUMBER}"
+        cp /tmp/kustomize-diff.html "diffs/pr-${PR_NUMBER}/index.html"
+        git add "diffs/pr-${PR_NUMBER}/index.html"
+
+        if ! git diff --cached --quiet; then
+          git commit -m "Update diff report for PR #${PR_NUMBER}"
+          git push origin gh-pages
+        fi
+
+        # Resolve Pages URL.
+        PAGES_BASE=$(gh api "repos/${{ github.repository }}/pages" --jq '.html_url' 2>/dev/null || true)
+        if [ -z "$PAGES_BASE" ]; then
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d/ -f2)
+          PAGES_BASE="https://${{ github.repository_owner }}.github.io/${REPO_NAME}"
+        fi
+        echo "url=${PAGES_BASE%/}/diffs/pr-${PR_NUMBER}/" >> "$GITHUB_OUTPUT"
+
     - name: Comment on PR
       if: inputs.mode == 'artifact' && github.event_name == 'pull_request'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
+        COMMENT_FILE=$(mktemp)
+
         if [ "${{ steps.diff.outputs.has-changes }}" = "true" ]; then
-          BODY="### Kustomize Diff Summary"
-          BODY="$BODY"$'\n\n'"**${{ steps.diff.outputs.files }}** file(s) changed — **+${{ steps.diff.outputs.added }}** added, **-${{ steps.diff.outputs.removed }}** removed"
-          BODY="$BODY"$'\n\n'"Download the [diff artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for the full HTML report."
+          echo "### Kustomize Diff Summary" >> "$COMMENT_FILE"
+          echo "" >> "$COMMENT_FILE"
+          echo "**${{ steps.diff.outputs.files }}** file(s) changed — **+${{ steps.diff.outputs.added }}** added, **-${{ steps.diff.outputs.removed }}** removed" >> "$COMMENT_FILE"
+
+          # Link to interactive HTML report on Pages.
+          PAGES_URL="${{ steps.pages.outputs.url }}"
+          if [ -n "$PAGES_URL" ]; then
+            echo "" >> "$COMMENT_FILE"
+            echo "**[View interactive diff report](${PAGES_URL})**" >> "$COMMENT_FILE"
+          fi
+
+          # Include inline diff in collapsible block.
+          DIFF_SIZE=$(wc -c < /tmp/kustomize-diff.diff | tr -d ' ')
+          if [ "$DIFF_SIZE" -le 60000 ]; then
+            {
+              echo ""
+              echo "<details>"
+              echo "<summary>Diff</summary>"
+              echo ""
+              echo '```diff'
+              cat /tmp/kustomize-diff.diff
+              echo '```'
+              echo ""
+              echo "</details>"
+            } >> "$COMMENT_FILE"
+          else
+            {
+              echo ""
+              echo "<details>"
+              echo "<summary>Diff (truncated)</summary>"
+              echo ""
+              echo '```diff'
+              head -c 60000 /tmp/kustomize-diff.diff
+              echo ""
+              echo "... (truncated, download artifact for full diff)"
+              echo '```'
+              echo ""
+              echo "</details>"
+            } >> "$COMMENT_FILE"
+          fi
+
+          echo "" >> "$COMMENT_FILE"
+          echo "Download the [diff artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for the full HTML report." >> "$COMMENT_FILE"
         else
-          BODY="### Kustomize Diff Summary"$'\n\n'"No changes to rendered manifests."
+          echo "### Kustomize Diff Summary" >> "$COMMENT_FILE"
+          echo "" >> "$COMMENT_FILE"
+          echo "No changes to rendered manifests." >> "$COMMENT_FILE"
         fi
 
-        gh pr comment "${{ github.event.pull_request.number }}" --body "$BODY"
+        gh pr comment "${{ github.event.pull_request.number }}" --body-file "$COMMENT_FILE"
+        rm -f "$COMMENT_FILE"
 
-    - name: Cleanup worktree
+    - name: Cleanup worktrees (artifact)
       if: inputs.mode == 'artifact' && always()
       shell: bash
       run: |
         git worktree remove /tmp/kustomize-base-tree --force 2>/dev/null || true
+        git worktree remove /tmp/kustomize-pages --force 2>/dev/null || true
 
     # ---- pr-branch mode ----
     # Permissions required: contents: write, pull-requests: write
