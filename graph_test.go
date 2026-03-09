@@ -287,6 +287,51 @@ resources:
 	}
 }
 
+func TestIntegration_ComponentKindExcluded(t *testing.T) {
+	tmp := t.TempDir()
+
+	// A root cluster and an unreferenced Component.
+	// The Component should NOT appear as a root.
+	writeKustomization(t, filepath.Join(tmp, "clusters", "dev"), `
+resources:
+  - ../../base
+`)
+	writeKustomization(t, filepath.Join(tmp, "base"), `
+resources:
+  - deployment.yaml
+`)
+	writeKustomization(t, filepath.Join(tmp, "patches", "image-pull-secrets"), `
+kind: Component
+apiVersion: kustomize.config.k8s.io/v1alpha1
+
+patches:
+  - target:
+      kind: ServiceAccount
+    patch: |-
+      - op: add
+        path: /imagePullSecrets
+`)
+
+	nodes, err := discover(tmp, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// discover finds 3 kustomization files.
+	if len(nodes) != 3 {
+		t.Fatalf("expected 3 discovered nodes, got %d", len(nodes))
+	}
+
+	g := buildGraph(nodes)
+	roots := findRoots(g, tmp)
+
+	// Only the cluster should be a root — the Component must be excluded.
+	expected := []string{"clusters/dev"}
+	if !reflect.DeepEqual(roots, expected) {
+		t.Errorf("got %v, want %v", roots, expected)
+	}
+}
+
 func TestIntegration_KustomizationYml(t *testing.T) {
 	tmp := t.TempDir()
 

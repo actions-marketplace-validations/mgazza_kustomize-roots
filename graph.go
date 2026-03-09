@@ -20,6 +20,7 @@ var kustomizationFileNames = []string{
 
 // kustomization is a minimal representation of a kustomization file.
 type kustomization struct {
+	Kind       string   `yaml:"kind"`
 	Resources  []string `yaml:"resources"`
 	Components []string `yaml:"components"`
 	Bases      []string `yaml:"bases"`
@@ -137,6 +138,13 @@ func buildGraph(nodes map[string]string) *graph {
 		var k kustomization
 		if err := yaml.Unmarshal(data, &k); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: parsing %s: %v\n", filePath, err)
+			continue
+		}
+
+		// Components are not standalone roots — remove them from the graph.
+		if k.Kind == "Component" {
+			delete(g.nodes, dir)
+			delete(g.inDegree, dir)
 			continue
 		}
 
