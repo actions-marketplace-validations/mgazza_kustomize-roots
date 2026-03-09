@@ -332,6 +332,122 @@ patches:
 	}
 }
 
+func TestAffectedRoots_LeafChange(t *testing.T) {
+	tmp := t.TempDir()
+
+	// clusters/local-dev -> components/agent -> base/agent
+	writeKustomization(t, filepath.Join(tmp, "clusters", "local-dev"), `
+resources:
+  - ../../components/agent
+`)
+	writeKustomization(t, filepath.Join(tmp, "components", "agent"), `
+resources:
+  - ../../base/agent
+`)
+	writeKustomization(t, filepath.Join(tmp, "base", "agent"), `
+resources:
+  - deployment.yaml
+`)
+
+	nodes, err := discover(tmp, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g := buildGraph(nodes)
+	roots := g.affectedRoots([]string{"base/agent/deployment.yaml"}, tmp)
+
+	expected := []string{"clusters/local-dev"}
+	if !reflect.DeepEqual(roots, expected) {
+		t.Errorf("got %v, want %v", roots, expected)
+	}
+}
+
+func TestAffectedRoots_RootDirChange(t *testing.T) {
+	tmp := t.TempDir()
+
+	writeKustomization(t, filepath.Join(tmp, "clusters", "dev"), `
+resources:
+  - ../../base
+`)
+	writeKustomization(t, filepath.Join(tmp, "clusters", "prod"), `
+resources:
+  - ../../base
+`)
+	writeKustomization(t, filepath.Join(tmp, "base"), `
+resources:
+  - deployment.yaml
+`)
+
+	nodes, err := discover(tmp, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g := buildGraph(nodes)
+	roots := g.affectedRoots([]string{"clusters/dev/kustomization.yaml"}, tmp)
+
+	expected := []string{"clusters/dev"}
+	if !reflect.DeepEqual(roots, expected) {
+		t.Errorf("got %v, want %v", roots, expected)
+	}
+}
+
+func TestAffectedRoots_UnrelatedFile(t *testing.T) {
+	tmp := t.TempDir()
+
+	writeKustomization(t, filepath.Join(tmp, "clusters", "dev"), `
+resources:
+  - ../../base
+`)
+	writeKustomization(t, filepath.Join(tmp, "base"), `
+resources:
+  - deployment.yaml
+`)
+
+	nodes, err := discover(tmp, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g := buildGraph(nodes)
+	roots := g.affectedRoots([]string{"docs/README.md"}, tmp)
+
+	if len(roots) != 0 {
+		t.Errorf("expected no affected roots, got %v", roots)
+	}
+}
+
+func TestAffectedRoots_SharedBase(t *testing.T) {
+	tmp := t.TempDir()
+
+	writeKustomization(t, filepath.Join(tmp, "clusters", "dev"), `
+resources:
+  - ../../base
+`)
+	writeKustomization(t, filepath.Join(tmp, "clusters", "prod"), `
+resources:
+  - ../../base
+`)
+	writeKustomization(t, filepath.Join(tmp, "base"), `
+resources:
+  - deployment.yaml
+`)
+
+	nodes, err := discover(tmp, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g := buildGraph(nodes)
+	roots := g.affectedRoots([]string{"base/deployment.yaml"}, tmp)
+
+	expected := []string{"clusters/dev", "clusters/prod"}
+	if !reflect.DeepEqual(roots, expected) {
+		t.Errorf("got %v, want %v", roots, expected)
+	}
+}
+
 func TestIntegration_KustomizationYml(t *testing.T) {
 	tmp := t.TempDir()
 
