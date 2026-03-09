@@ -24,11 +24,12 @@ func main() {
 	}
 
 	var (
-		buildFlag   = flag.Bool("build", false, "Build each root via kustomize build")
-		outputDir   = flag.String("output-dir", "", "Write build output to files instead of stdout")
-		jsonFlag    = flag.Bool("json", false, "Output root paths as JSON array")
-		verboseFlag = flag.Bool("verbose", false, "Print reference graph to stderr")
-		excludes    excludeFlags
+		buildFlag    = flag.Bool("build", false, "Build each root via kustomize build")
+		outputDir    = flag.String("output-dir", "", "Write build output to files instead of stdout")
+		changedFiles = flag.String("changed-files", "", "Space-separated changed file paths — only build roots affected by these files")
+		jsonFlag     = flag.Bool("json", false, "Output root paths as JSON array")
+		verboseFlag  = flag.Bool("verbose", false, "Print reference graph to stderr")
+		excludes     excludeFlags
 	)
 	flag.Var(&excludes, "exclude", "Glob patterns to skip directories (repeatable)")
 	flag.Parse()
@@ -55,6 +56,14 @@ func main() {
 	}
 
 	roots := findRoots(g, dir)
+
+	if *changedFiles != "" {
+		roots = g.affectedRoots(strings.Fields(*changedFiles), dir)
+		if len(roots) == 0 {
+			fmt.Fprintln(os.Stderr, "no roots affected by changed files")
+			return
+		}
+	}
 
 	if *buildFlag {
 		if err := buildRoots(roots, dir, *outputDir); err != nil {
