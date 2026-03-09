@@ -120,9 +120,11 @@ runs:
           EXCLUDE_ARGS="$EXCLUDE_ARGS -exclude $pattern"
         done
 
+        CHANGED_FILES=$(git diff --name-only ${{ steps.base-ref.outputs.ref }} HEAD | tr '\n' ' ')
+
         git worktree add /tmp/kustomize-base-tree ${{ steps.base-ref.outputs.ref }}
         cd /tmp/kustomize-base-tree
-        ${{ github.action_path }}/kustomize-roots -build -output-dir /tmp/kustomize-base $EXCLUDE_ARGS "${{ inputs.directory }}"
+        ${{ github.action_path }}/kustomize-roots -build -output-dir /tmp/kustomize-base -changed-files "$CHANGED_FILES" $EXCLUDE_ARGS "${{ inputs.directory }}"
 
     - name: Render head manifests
       if: inputs.mode == 'artifact'
@@ -133,8 +135,10 @@ runs:
           EXCLUDE_ARGS="$EXCLUDE_ARGS -exclude $pattern"
         done
 
+        CHANGED_FILES=$(git diff --name-only ${{ steps.base-ref.outputs.ref }} HEAD | tr '\n' ' ')
+
         mkdir -p /tmp/kustomize-head
-        ${{ github.action_path }}/kustomize-roots -build -output-dir /tmp/kustomize-head $EXCLUDE_ARGS "${{ inputs.directory }}"
+        ${{ github.action_path }}/kustomize-roots -build -output-dir /tmp/kustomize-head -changed-files "$CHANGED_FILES" $EXCLUDE_ARGS "${{ inputs.directory }}"
 
     - name: Generate diffs
       id: diff
