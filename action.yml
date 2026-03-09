@@ -211,7 +211,8 @@ runs:
         fi
 
         # Resolve Pages URL.
-        PAGES_BASE=$(gh api "repos/${{ github.repository }}/pages" --jq '.html_url' 2>/dev/null || true)
+        PAGES_BASE=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+          "$GITHUB_API_URL/repos/${{ github.repository }}/pages" 2>/dev/null | jq -r '.html_url' 2>/dev/null || true)
         if [ -z "$PAGES_BASE" ]; then
           REPO_NAME=$(echo "${{ github.repository }}" | cut -d/ -f2)
           PAGES_BASE="https://${{ github.repository_owner }}.github.io/${REPO_NAME}"
@@ -276,7 +277,11 @@ runs:
           echo "No changes to rendered manifests." >> "$COMMENT_FILE"
         fi
 
-        gh pr comment "${{ github.event.pull_request.number }}" --body-file "$COMMENT_FILE"
+        curl -sf -X POST \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          -H "Content-Type: application/json" \
+          "$GITHUB_API_URL/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+          -d "$(jq -Rs '{body: .}' < "$COMMENT_FILE")"
         rm -f "$COMMENT_FILE"
 
     - name: Cleanup worktrees (artifact)
@@ -407,22 +412,28 @@ runs:
         SHADOW_BRANCH="${RENDERED}-pr-${PR_NUMBER}"
 
         # Check if shadow PR already exists.
-        EXISTING=$(gh pr list --base "$RENDERED" --head "$SHADOW_BRANCH" --json number --jq '.[0].number' 2>/dev/null || true)
+        EXISTING=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+          "$GITHUB_API_URL/repos/${{ github.repository }}/pulls?base=$RENDERED&head=${{ github.repository_owner }}:$SHADOW_BRANCH&state=open" 2>/dev/null \
+          | jq -r '.[0].number // empty' 2>/dev/null || true)
 
-        if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
+        if [ -n "$EXISTING" ]; then
           echo "Shadow PR #$EXISTING already exists, updated via force push."
           echo "number=$EXISTING" >> "$GITHUB_OUTPUT"
         else
-          PR_BODY="Shadow PR showing rendered manifest diff for #$PR_NUMBER."
-          PR_BODY="$PR_BODY This PR is automatically managed. Do not merge manually."
-          SHADOW_URL=$(gh pr create \
-            --base "$RENDERED" \
-            --head "$SHADOW_BRANCH" \
-            --title "Rendered: ${{ github.event.pull_request.title }}" \
-            --body "$PR_BODY" 2>/dev/null || true)
+          PR_BODY="Shadow PR showing rendered manifest diff for #$PR_NUMBER. This PR is automatically managed. Do not merge manually."
+          SHADOW_NUMBER=$(curl -sf -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$GITHUB_API_URL/repos/${{ github.repository }}/pulls" \
+            -d "$(jq -n \
+              --arg title "Rendered: ${{ github.event.pull_request.title }}" \
+              --arg head "$SHADOW_BRANCH" \
+              --arg base "$RENDERED" \
+              --arg body "$PR_BODY" \
+              '{title: $title, head: $head, base: $base, body: $body}')" \
+            | jq -r '.number' 2>/dev/null || true)
 
-          if [ -n "$SHADOW_URL" ]; then
-            SHADOW_NUMBER=$(echo "$SHADOW_URL" | grep -oE '[0-9]+$')
+          if [ -n "$SHADOW_NUMBER" ] && [ "$SHADOW_NUMBER" != "null" ]; then
             echo "number=$SHADOW_NUMBER" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::Failed to create shadow PR"
@@ -441,7 +452,11 @@ runs:
         BODY="$BODY"$'\n\n'"View the rendered manifest changes in the **Files Changed** tab of the shadow PR:"
         BODY="$BODY"$'\n\n'"**[Shadow PR #${SHADOW_NUMBER}](${REPO_URL}/pull/${SHADOW_NUMBER}/files)**"
         BODY="$BODY"$'\n\n'"This shows the actual Kubernetes resources that will change when this PR is merged."
-        gh pr comment "${{ github.event.pull_request.number }}" --body "$BODY"
+        curl -sf -X POST \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          -H "Content-Type: application/json" \
+          "$GITHUB_API_URL/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+          -d "$(jq -n --arg body "$BODY" '{body: $body}')"
 
     - name: Handle source PR closed (pr-branch)
       if: inputs.mode == 'pr-branch' && github.event.action == 'closed'
@@ -454,20 +469,34 @@ runs:
         SHADOW_BRANCH="${RENDERED}-pr-${PR_NUMBER}"
 
         # Find the shadow PR.
-        SHADOW_NUMBER=$(gh pr list --base "$RENDERED" --head "$SHADOW_BRANCH" --json number --jq '.[0].number' 2>/dev/null || true)
+        SHADOW_NUMBER=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+          "$GITHUB_API_URL/repos/${{ github.repository }}/pulls?base=$RENDERED&head=${{ github.repository_owner }}:$SHADOW_BRANCH&state=open" 2>/dev/null \
+          | jq -r '.[0].number // empty' 2>/dev/null || true)
 
-        if [ -z "$SHADOW_NUMBER" ] || [ "$SHADOW_NUMBER" = "null" ]; then
+        if [ -z "$SHADOW_NUMBER" ]; then
           echo "No shadow PR found for $SHADOW_BRANCH, nothing to clean up."
           exit 0
         fi
 
         if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
           echo "Source PR merged — merging shadow PR #$SHADOW_NUMBER"
-          gh pr merge "$SHADOW_NUMBER" --merge --delete-branch || echo "::warning::Failed to merge shadow PR #$SHADOW_NUMBER"
+          curl -sf -X PUT \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$GITHUB_API_URL/repos/${{ github.repository }}/pulls/$SHADOW_NUMBER/merge" \
+            -d '{"merge_method": "merge"}' || echo "::warning::Failed to merge shadow PR #$SHADOW_NUMBER"
         else
           echo "Source PR closed without merge — closing shadow PR #$SHADOW_NUMBER"
-          gh pr close "$SHADOW_NUMBER" --delete-branch || echo "::warning::Failed to close shadow PR #$SHADOW_NUMBER"
+          curl -sf -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$GITHUB_API_URL/repos/${{ github.repository }}/pulls/$SHADOW_NUMBER" \
+            -d '{"state": "closed"}' || echo "::warning::Failed to close shadow PR #$SHADOW_NUMBER"
         fi
+        # Clean up shadow branch.
+        curl -sf -X DELETE \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          "$GITHUB_API_URL/repos/${{ github.repository }}/git/refs/heads/$SHADOW_BRANCH" 2>/dev/null || true
 
     - name: Cleanup worktrees (pr-branch)
       if: inputs.mode == 'pr-branch' && always()
