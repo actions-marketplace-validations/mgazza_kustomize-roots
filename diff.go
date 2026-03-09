@@ -235,48 +235,120 @@ func filterToHunks(ops []editOp, context int) []hunk {
 	return hunks
 }
 
-// computeEditScript produces a minimal edit script between two line slices.
+// computeEditScript produces a minimal edit script between two line slices
+// using Hirschberg's algorithm for O(min(n,m)) space instead of O(n*m).
 func computeEditScript(a, b []string) []editOp {
+	return hirschberg(a, b)
+}
+
+// hirschberg recursively computes the edit script in linear space.
+func hirschberg(a, b []string) []editOp {
 	n, m := len(a), len(b)
-	// Build LCS table.
-	dp := make([][]int, n+1)
-	for i := range dp {
-		dp[i] = make([]int, m+1)
+
+	if n == 0 {
+		ops := make([]editOp, m)
+		for j := range b {
+			ops[j] = editOp{opInsert, b[j]}
+		}
+		return ops
 	}
-	for i := 1; i <= n; i++ {
-		for j := 1; j <= m; j++ {
-			if a[i-1] == b[j-1] {
-				dp[i][j] = dp[i-1][j-1] + 1
-			} else if dp[i-1][j] >= dp[i][j-1] {
-				dp[i][j] = dp[i-1][j]
-			} else {
-				dp[i][j] = dp[i][j-1]
-			}
+	if m == 0 {
+		ops := make([]editOp, n)
+		for i := range a {
+			ops[i] = editOp{opDelete, a[i]}
+		}
+		return ops
+	}
+	if n == 1 {
+		return hirschbergBase(a[0], b)
+	}
+
+	mid := n / 2
+
+	// Forward: LCS lengths for a[:mid] vs b[:j]
+	fwd := lcsForward(a[:mid], b)
+	// Backward: LCS lengths for a[mid:] vs b[j:]
+	bwd := lcsBackward(a[mid:], b)
+
+	// Find optimal split point in b.
+	best := 0
+	for j := 1; j <= m; j++ {
+		if fwd[j]+bwd[j] > fwd[best]+bwd[best] {
+			best = j
 		}
 	}
 
-	// Backtrack to produce edit script.
-	var ops []editOp
-	i, j := n, m
-	for i > 0 || j > 0 {
-		if i > 0 && j > 0 && a[i-1] == b[j-1] {
-			ops = append(ops, editOp{opEqual, a[i-1]})
-			i--
-			j--
-		} else if j > 0 && (i == 0 || dp[i][j-1] >= dp[i-1][j]) {
-			ops = append(ops, editOp{opInsert, b[j-1]})
-			j--
-		} else {
-			ops = append(ops, editOp{opDelete, a[i-1]})
-			i--
+	left := hirschberg(a[:mid], b[:best])
+	right := hirschberg(a[mid:], b[best:])
+	return append(left, right...)
+}
+
+// hirschbergBase handles the case where a has a single element.
+func hirschbergBase(line string, b []string) []editOp {
+	found := -1
+	for j, bline := range b {
+		if line == bline {
+			found = j
+			break
 		}
 	}
-
-	// Reverse (backtrack produces reversed order).
-	for l, r := 0, len(ops)-1; l < r; l, r = l+1, r-1 {
-		ops[l], ops[r] = ops[r], ops[l]
+	if found < 0 {
+		ops := make([]editOp, 0, 1+len(b))
+		ops = append(ops, editOp{opDelete, line})
+		for _, bline := range b {
+			ops = append(ops, editOp{opInsert, bline})
+		}
+		return ops
+	}
+	ops := make([]editOp, 0, len(b))
+	for j := 0; j < found; j++ {
+		ops = append(ops, editOp{opInsert, b[j]})
+	}
+	ops = append(ops, editOp{opEqual, line})
+	for j := found + 1; j < len(b); j++ {
+		ops = append(ops, editOp{opInsert, b[j]})
 	}
 	return ops
+}
+
+// lcsForward computes LCS lengths in the forward direction using O(m) space.
+// Returns row where row[j] = LCS(a, b[:j]).
+func lcsForward(a, b []string) []int {
+	m := len(b)
+	prev := make([]int, m+1)
+	curr := make([]int, m+1)
+	for _, aLine := range a {
+		for j := 1; j <= m; j++ {
+			if aLine == b[j-1] {
+				curr[j] = prev[j-1] + 1
+			} else {
+				curr[j] = max(prev[j], curr[j-1])
+			}
+		}
+		prev, curr = curr, prev
+		clear(curr)
+	}
+	return prev
+}
+
+// lcsBackward computes LCS lengths in the backward direction using O(m) space.
+// Returns row where row[j] = LCS(a, b[j:]).
+func lcsBackward(a, b []string) []int {
+	m := len(b)
+	prev := make([]int, m+1)
+	curr := make([]int, m+1)
+	for i := len(a) - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			if a[i] == b[j] {
+				curr[j] = prev[j+1] + 1
+			} else {
+				curr[j] = max(prev[j], curr[j+1])
+			}
+		}
+		prev, curr = curr, prev
+		clear(curr)
+	}
+	return prev
 }
 
 func countLines(s string) int {
