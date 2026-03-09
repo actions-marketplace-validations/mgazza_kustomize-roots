@@ -32,6 +32,8 @@ type graph struct {
 	nodes map[string]string
 	// edges maps a kustomization dir to the dirs it references.
 	edges map[string][]string
+	// reverseEdges maps a referenced dir back to the dirs that reference it.
+	reverseEdges map[string][]string
 	// inDegree tracks how many times each node is referenced.
 	inDegree map[string]int
 }
@@ -118,9 +120,10 @@ func references(k kustomization) []string {
 // buildGraph constructs a reference graph from discovered kustomizations.
 func buildGraph(nodes map[string]string) *graph {
 	g := &graph{
-		nodes:    nodes,
-		edges:    make(map[string][]string),
-		inDegree: make(map[string]int),
+		nodes:        nodes,
+		edges:        make(map[string][]string),
+		reverseEdges: make(map[string][]string),
+		inDegree:     make(map[string]int),
 	}
 
 	// Initialize in-degree for all nodes.
@@ -153,6 +156,7 @@ func buildGraph(nodes map[string]string) *graph {
 			target = filepath.Clean(target)
 			if _, exists := nodes[target]; exists {
 				g.edges[dir] = append(g.edges[dir], target)
+				g.reverseEdges[target] = append(g.reverseEdges[target], dir)
 				g.inDegree[target]++
 			}
 		}
@@ -168,6 +172,63 @@ func findRoots(g *graph, root string) []string {
 	for dir, deg := range g.inDegree {
 		if deg == 0 {
 			rel, err := filepath.Rel(absRoot, dir)
+			if err != nil {
+				rel = dir
+			}
+			roots = append(roots, rel)
+		}
+	}
+	sort.Strings(roots)
+	return roots
+}
+
+// affectedRoots returns the root kustomizations affected by the given changed file paths.
+// Changed paths are relative to baseDir. It walks up from each changed file to find the
+// nearest kustomization node, then traverses reverse edges to find all affected roots.
+func (g *graph) affectedRoots(changedPaths []string, baseDir string) []string {
+	absBase, _ := filepath.Abs(baseDir)
+
+	// Find kustomization directories affected by the changed files.
+	affected := make(map[string]bool)
+	for _, cp := range changedPaths {
+		absPath := filepath.Join(absBase, cp)
+		dir := filepath.Dir(absPath)
+		for {
+			if _, ok := g.nodes[dir]; ok {
+				affected[dir] = true
+				break
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break // reached filesystem root
+			}
+			dir = parent
+		}
+	}
+
+	// BFS up reverse edges to find all affected ancestors.
+	visited := make(map[string]bool)
+	queue := make([]string, 0, len(affected))
+	for dir := range affected {
+		visited[dir] = true
+		queue = append(queue, dir)
+	}
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		for _, parent := range g.reverseEdges[node] {
+			if !visited[parent] {
+				visited[parent] = true
+				queue = append(queue, parent)
+			}
+		}
+	}
+
+	// Filter to roots (inDegree == 0) and convert to relative paths.
+	var roots []string
+	for dir := range visited {
+		if g.inDegree[dir] == 0 {
+			rel, err := filepath.Rel(absBase, dir)
 			if err != nil {
 				rel = dir
 			}
